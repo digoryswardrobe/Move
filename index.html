@@ -303,6 +303,21 @@ function normalize(raw){
     });
     if (type !== 'kb' && raw.ticks && raw.ticks[k]) out.ticks[k] = true;
   });
+  /* pending: changes held back for days already done this week, applied when the week resets. { exerciseId: { field: value } } */
+  out.pending = {};
+  var ids = {};
+  allKeys().forEach(function(k){ out.days[k].forEach(function(e){ ids[e.id] = e; }); });
+  if (raw.pending && typeof raw.pending === 'object'){
+    Object.keys(raw.pending).forEach(function(id){
+      var p = raw.pending[id], e = ids[id], q = {};
+      if (!e || !p || typeof p !== 'object') return;
+      Object.keys(p).forEach(function(f){
+        if (f === 'band'){ if ('band' in e && BANDS.indexOf(p.band) >= 0) q.band = p.band; }
+        else if (f in LIMITS && f in e) q[f] = clamp(p[f], f);
+      });
+      if (Object.keys(q).length) out.pending[id] = q;
+    });
+  }
   return out;
 }
 function load(){
@@ -317,8 +332,38 @@ function save(){
 /* New week (Monday) -> clear ticks, keep exercises. */
 function checkWeek(){
   var k = weekKey();
-  if (state.weekKey !== k){ state.weekKey = k; state.ticks = {}; save(); return true; }
+  if (state.weekKey !== k){
+    allKeys().forEach(applyPending);   /* last week's done days catch up with the latest values */
+    state.weekKey = k; state.ticks = {}; save(); return true;
+  }
   return false;
+}
+/* Apply any held-back changes to the exercises on one day. */
+function applyPending(key){
+  state.days[key].forEach(function(e){
+    var p = state.pending[e.id]; if (!p) return;
+    Object.keys(p).forEach(function(f){ if (f in e) e[f] = p[f]; });
+    delete state.pending[e.id];
+  });
+}
+/* A value changed on one day: carry it to every exercise with the same name in that section.
+   The day being edited, and days not done this week, change now. Days already done keep what you did
+   and get the new value when ticks clear next Monday. Kettlebell is not linked. */
+function carryAcross(key, name, f, v){
+  var type = typeOf(key), match = name.trim().toLowerCase();
+  if (type !== 'physio' && type !== 'gym') return;
+  SECTIONS[type].days.forEach(function(d){
+    var k = dayKey(type, d[0]), now = k === key || !state.ticks[k];
+    state.days[k].forEach(function(e){
+      if (e.name.trim().toLowerCase() !== match || !(f in e)) return;
+      if (now){
+        e[f] = v;
+        if (state.pending[e.id]){ delete state.pending[e.id][f]; if (!Object.keys(state.pending[e.id]).length) delete state.pending[e.id]; }
+      } else {
+        (state.pending[e.id] = state.pending[e.id] || {})[f] = v;
+      }
+    });
+  });
 }
 function countTicks(s){
   return SECTIONS[s].days.filter(function(d){ return state.ticks[dayKey(s,d[0])]; }).length;
@@ -639,7 +684,8 @@ document.addEventListener('click', function(ev){
   else if (act === 'tick'){
     checkWeek();
     var k = dayKey(view.section, t.getAttribute('data-d'));
-    if (state.ticks[k]) delete state.ticks[k]; else state.ticks[k] = true;
+    if (state.ticks[k]){ delete state.ticks[k]; applyPending(k); }   /* unticked: it catches up now */
+    else state.ticks[k] = true;
     save(); render();
   }
   else if (act === 'add'){
@@ -659,9 +705,12 @@ document.addEventListener('click', function(ev){
 app.addEventListener('change', function(ev){
   var t = ev.target, f = t.getAttribute('data-f'), found = findEx(t.getAttribute('data-id'));
   if (!f || !found) return;
-  var e = found.ex;
-  if (f === 'band'){ if (BANDS.indexOf(t.value) >= 0) e.band = t.value; }
-  else if (f in e){ e[f] = clamp(t.value, f); t.value = e[f]; }
+  var e = found.ex, v;
+  if (f === 'band'){ if (BANDS.indexOf(t.value) < 0) return; v = t.value; }
+  else if (f in e){ v = clamp(t.value, f); t.value = v; }
+  else return;
+  e[f] = v;
+  carryAcross(found.key, e.name, f, v);
   save();
 });
 app.addEventListener('focusin', function(ev){
